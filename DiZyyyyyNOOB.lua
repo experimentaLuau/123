@@ -107,30 +107,23 @@ local function CreateSilentAimCore()
         return zones
     end
 
-    local function IsInSafeZonePhysically(character)
+    local function IsPhysicallyInSafeZone(character)
         if not character then return false end
         
-        local partsToCheck = {
-            "HumanoidRootPart",
-            "Head",
-            "Torso",
-            "Left Arm",
-            "Right Arm",
-            "Left Leg",
-            "Right Leg"
-        }
+        local hrp = character:FindFirstChild("HumanoidRootPart")
+        if not hrp then return false end
         
         local allZones = CollectSafeZones()
+        local charPos = hrp.Position
         
-        for _, partName in ipairs(partsToCheck) do
-            local part = character:FindFirstChild(partName)
-            if part and part:IsA("BasePart") then
-                local pos = part.Position
-                for _, zone in ipairs(allZones) do
-                    if IsPointInPart(pos, zone) then
-                        return true
-                    end
-                end
+        for _, zone in ipairs(allZones) do
+            local relativePos = charPos - zone.Position
+            local halfSize = zone.Size / 2
+            
+            if math.abs(relativePos.X) <= halfSize.X and 
+               math.abs(relativePos.Y) <= halfSize.Y and 
+               math.abs(relativePos.Z) <= halfSize.Z then
+                return true
             end
         end
         
@@ -158,18 +151,18 @@ local function CreateSilentAimCore()
         InitializePlayerSZStatus(player)
         local status = playerSafeZoneStatus[player.UserId]
         
-        local physicallyInside = IsInSafeZonePhysically(character)
+        local physicallyInside = IsPhysicallyInSafeZone(character)
         local currentTime = tick()
         
-        if status.justSpawned and physicallyInside then
+        if status.justSpawned then
             status.justSpawned = false
             status.isProtected = false
             status.physicallyInside = physicallyInside
-            status.enterTime = currentTime
+            if physicallyInside then
+                status.enterTime = currentTime
+            end
             return false
         end
-        
-        status.justSpawned = false
         
         if physicallyInside ~= status.physicallyInside then
             if physicallyInside then
@@ -303,7 +296,7 @@ local function CreateSilentAimCore()
         end
         
         if forAutoFire then
-            if IsInSafeZone(myCharacter) then
+            if IsPhysicallyInSafeZone(myCharacter) then
                 return nil
             end
             if myCharacter:FindFirstChildOfClass("ForceField") then
@@ -355,6 +348,7 @@ local function CreateSilentAimCore()
     return {
         GetClosestEnemyHead = GetClosestEnemyHead,
         IsInSafeZone = IsInSafeZone,
+        IsPhysicallyInSafeZone = IsPhysicallyInSafeZone,
         AdvancedRaycast = AdvancedRaycast,
         IsPlayerTargeted = IsPlayerTargeted,
         CollectSafeZones = CollectSafeZones,
@@ -768,7 +762,7 @@ local function GetClosestEnemyPart(targetPart, targetListEnabled, targetedPlayer
         return nil, nil
     end
     
-    if SilentAimCore.IsInSafeZone(myCharacter) then
+    if SilentAimCore.IsPhysicallyInSafeZone(myCharacter) then
         return nil, nil
     end
     
@@ -848,7 +842,7 @@ RunService.RenderStepped:Connect(function()
     
     local myCharacter = LocalPlayer.Character
     if not myCharacter then return end
-    if SilentAimCore.IsInSafeZone(myCharacter) then return end
+    if SilentAimCore.IsPhysicallyInSafeZone(myCharacter) then return end
     if myCharacter:FindFirstChildOfClass("ForceField") then return end
     
     local tool = myCharacter:FindFirstChildOfClass("Tool")
@@ -865,7 +859,7 @@ RunService.RenderStepped:Connect(function()
     
     local myCharacter = LocalPlayer.Character
     if not myCharacter then return end
-    if SilentAimCore.IsInSafeZone(myCharacter) then return end
+    if SilentAimCore.IsPhysicallyInSafeZone(myCharacter) then return end
     if myCharacter:FindFirstChildOfClass("ForceField") then return end
     
     if AimLockTarget and AimLockTarget.Character then
