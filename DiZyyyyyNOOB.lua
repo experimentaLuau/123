@@ -7,7 +7,8 @@ local Window = Rayfield:CreateWindow({
     LoadingTitle = "Lackadaisy",
     LoadingSubtitle = "by 14z88",
     ShowText = "Lackadaisy",
-    Theme = "Default"
+    Theme = "Default",
+    ToggleUIKeybind = "K"
 })
 
 Rayfield:Notify({
@@ -20,6 +21,7 @@ Rayfield:Notify({
 local MainTab = Window:CreateTab("Main", "crosshair")
 local VisualTab = Window:CreateTab("Visual", "scan-eye")
 local TeleportTab = Window:CreateTab("Teleport", "satellite-dish")
+local ToolsTab = Window:CreateTab("Tools", "hammer")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -57,6 +59,12 @@ local TPToAimlockedEnabled = false
 local UseMaxTeleportDistance = false
 local MAX_TELEPORT_DISTANCE = 90
 
+local AutoJumpEnabled = false
+local AutoSprintEnabled = false
+local NoFallDamageEnabled = false
+local LadderSize = 500
+local CreatedLadders = {}
+
 local ProtectedTeams = {
     ["Житель"] = true,
     ["Оружейный Диллер"] = true
@@ -73,9 +81,44 @@ local bodyPartMapping = {
     ["Right Leg"] = {parts = {"Right Leg"}, offset = Vector3.new(0, 0.1, 0)}
 }
 
-local SAFEZONE_DELAY = 1
-local playerSafeZoneStatus = {}
 local cachedSafeZones = nil
+
+local CustomCrosshairEnabled = false
+local ShowSafeZoneEnabled = false
+local SafeZoneESP = nil
+
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+local CONFIG = {
+    GRID_SIZE = 16,
+    PIXEL_SIZE = 18,
+    CUSTOM_TAG = "CustomPixel"
+}
+
+local PALETTE = {
+    Color3.new(1, 1, 1),
+    Color3.new(0, 0, 0),
+    Color3.new(1, 0, 0),
+    Color3.new(0, 1, 0),
+    Color3.new(0, 0, 1),
+    Color3.new(1, 1, 0),
+    Color3.new(1, 0, 1),
+    Color3.new(0, 1, 1),
+    Color3.new(1, 0.5, 0),
+    Color3.new(0.5, 0, 1)
+}
+
+local EditorGui = nil
+local CurrentColor = Color3.new(0, 0, 0)
+local IsEraser = false
+local PixelData = {}
+local IsDrawing = false
+
+local SavedCrosshairData = nil
+local CurrentRoot = nil
+local RootChildAddedConn = nil
+local ToolConns = {}
+local CharConns = {}
 
 local function CreateSilentAimCore()
     local function IsPointInPart(point, part)
@@ -107,7 +150,7 @@ local function CreateSilentAimCore()
         return zones
     end
 
-    local function IsInSafeZonePhysically(character)
+    local function IsInSafeZone(character)
         if not character then return false end
         
         local partsToCheck = {
@@ -135,64 +178,6 @@ local function CreateSilentAimCore()
         end
         
         return false
-    end
-
-    local function InitializePlayerSZStatus(player)
-        if not playerSafeZoneStatus[player.UserId] then
-            playerSafeZoneStatus[player.UserId] = {
-                isProtected = false,
-                physicallyInside = false,
-                enterTime = nil,
-                exitTime = nil,
-                justSpawned = true
-            }
-        end
-    end
-
-    local function IsInSafeZone(character)
-        if not character then return false end
-        
-        local player = Players:GetPlayerFromCharacter(character)
-        if not player then return false end
-        
-        InitializePlayerSZStatus(player)
-        local status = playerSafeZoneStatus[player.UserId]
-        
-        local physicallyInside = IsInSafeZonePhysically(character)
-        local currentTime = tick()
-        
-        if status.justSpawned and physicallyInside then
-            status.justSpawned = false
-            status.isProtected = true
-            status.physicallyInside = physicallyInside
-            status.enterTime = currentTime
-            return true
-        end
-        
-        status.justSpawned = false
-        
-        if physicallyInside ~= status.physicallyInside then
-            if physicallyInside then
-                status.enterTime = currentTime
-                status.exitTime = nil
-            else
-                status.exitTime = currentTime
-                status.enterTime = nil
-            end
-            status.physicallyInside = physicallyInside
-        end
-        
-        if physicallyInside then
-            if status.enterTime and (currentTime - status.enterTime) >= SAFEZONE_DELAY then
-                status.isProtected = true
-            end
-        else
-            if status.exitTime and (currentTime - status.exitTime) >= SAFEZONE_DELAY then
-                status.isProtected = false
-            end
-        end
-        
-        return status.isProtected
     end
 
     local function IsPlayerTargeted(player, targetListEnabled, targetedPlayers)
@@ -363,30 +348,6 @@ local function CreateSilentAimCore()
 end
 
 local SilentAimCore = CreateSilentAimCore()
-
-Players.PlayerAdded:Connect(function(player)
-    playerSafeZoneStatus[player.UserId] = {
-        isProtected = false,
-        physicallyInside = false,
-        enterTime = nil,
-        exitTime = nil,
-        justSpawned = true
-    }
-end)
-
-Players.PlayerRemoving:Connect(function(player)
-    playerSafeZoneStatus[player.UserId] = nil
-end)
-
-for _, player in pairs(Players:GetPlayers()) do
-    playerSafeZoneStatus[player.UserId] = {
-        isProtected = false,
-        physicallyInside = false,
-        enterTime = nil,
-        exitTime = nil,
-        justSpawned = true
-    }
-end
 
 local function CreatePlayerFrame(player, scrollFrame, targetedPlayers)
     local PlayerFrame = Instance.new("Frame")
@@ -822,6 +783,545 @@ local function GetClosestEnemyPart(targetPart, targetListEnabled, targetedPlayer
     end
 
     return closestPartPos, closestPlayer
+end
+
+local function MakeDraggable(frame)
+    local dragging = false
+    local dragInput, mousePos, framePos
+    frame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            mousePos = input.Position
+            framePos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    frame.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            dragInput = input
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - mousePos
+            frame.Position = UDim2.new(
+                framePos.X.Scale, framePos.X.Offset + delta.X,
+                framePos.Y.Scale, framePos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+local function HasWeapon()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    for _, item in ipairs(char:GetChildren()) do
+        if item:IsA("Tool") then
+            return true
+        end
+    end
+    return false
+end
+
+local function IsCrosshairBar(f)
+    return f and f:IsA("Frame") and (f:GetAttribute("Force") ~= nil or f:GetAttribute("Default") ~= nil)
+end
+
+local function FindCrosshairContainer()
+    for _, gui in ipairs(PlayerGui:GetChildren()) do
+        if gui:IsA("ScreenGui") and gui.Name ~= "CrosshairEditor" and gui.Enabled then
+            local root = gui:FindFirstChildOfClass("Frame")
+            if root and root.Visible then
+                local bars = 0
+                for _, ch in ipairs(root:GetChildren()) do
+                    if IsCrosshairBar(ch) then
+                        bars += 1
+                    end
+                end
+                if bars >= 4 then
+                    return root
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function DisconnectConn(conn)
+    if conn and conn.Connected then
+        conn:Disconnect()
+    end
+end
+
+local function DisconnectArrayConns(arr)
+    for i = 1, #arr do
+        DisconnectConn(arr[i])
+        arr[i] = nil
+    end
+end
+
+local function ClearCustomPixels(root)
+    if not root then return end
+    for _, ch in ipairs(root:GetChildren()) do
+        if ch:IsA("Frame") and ch.Name == CONFIG.CUSTOM_TAG then
+            ch:Destroy()
+        end
+    end
+end
+
+local function HideOriginalBars(root, hide)
+    if not root then return end
+    for _, ch in ipairs(root:GetChildren()) do
+        if ch:IsA("Frame") and ch.Name ~= CONFIG.CUSTOM_TAG then
+            ch.Visible = not hide
+            for _, subCh in ipairs(ch:GetDescendants()) do
+                if subCh:IsA("GuiObject") then
+                    subCh.Visible = not hide
+                end
+            end
+        end
+    end
+end
+
+local function BuildCustom(root)
+    if not root or not SavedCrosshairData then return end
+    ClearCustomPixels(root)
+    local cx = CONFIG.GRID_SIZE / 2
+    local cy = CONFIG.GRID_SIZE / 2
+    for y = 1, CONFIG.GRID_SIZE do
+        local row = SavedCrosshairData[y]
+        if row then
+            for x = 1, CONFIG.GRID_SIZE do
+                local color = row[x]
+                if color then
+                    local px = Instance.new("Frame")
+                    px.Name = CONFIG.CUSTOM_TAG
+                    px.Size = UDim2.new(0, 2, 0, 2)
+                    px.AnchorPoint = Vector2.new(0.5, 0.5)
+                    local offX = (x - cx - 0.5) * 2
+                    local offY = (y - cy - 0.5) * 2
+                    px.Position = UDim2.new(0.5, offX, 0.5, offY)
+                    px.BackgroundColor3 = color
+                    px.BorderSizePixel = 0
+                    px.ZIndex = 10
+                    px.Parent = root
+                end
+            end
+        end
+    end
+end
+
+local function AttachRootChildFilter(root)
+    DisconnectConn(RootChildAddedConn)
+    if not root then return end
+    RootChildAddedConn = root.ChildAdded:Connect(function(ch)
+        if CustomCrosshairEnabled and ch:IsA("Frame") and ch.Name ~= CONFIG.CUSTOM_TAG then
+            ch.Visible = false
+            for _, subCh in ipairs(ch:GetDescendants()) do
+                if subCh:IsA("GuiObject") then
+                    subCh.Visible = false
+                end
+            end
+        end
+    end)
+end
+
+local function ApplyToRoot(root)
+    if not root then return end
+    if not CustomCrosshairEnabled then return end
+    local oldVisible = root.Visible
+    root.Visible = false
+    HideOriginalBars(root, true)
+    BuildCustom(root)
+    AttachRootChildFilter(root)
+    root.Visible = oldVisible
+    CurrentRoot = root
+end
+
+local function SaveDesignFromEditor()
+    local data = {}
+    for y = 1, CONFIG.GRID_SIZE do
+        data[y] = {}
+        for x = 1, CONFIG.GRID_SIZE do
+            local cell = PixelData[y] and PixelData[y][x]
+            if cell and cell.BackgroundTransparency < 1 then
+                data[y][x] = cell.BackgroundColor3
+            end
+        end
+    end
+    SavedCrosshairData = data
+end
+
+local function OnToolEquipped(tool)
+    if not CustomCrosshairEnabled then return end
+    task.spawn(function()
+        local root
+        for i = 1, 40 do
+            root = FindCrosshairContainer()
+            if root then break end
+            task.wait(0.05)
+        end
+        if root and SavedCrosshairData then
+            ApplyToRoot(root)
+        end
+    end)
+end
+
+local function OnToolUnequipped(tool)
+    if CurrentRoot then
+        ClearCustomPixels(CurrentRoot)
+        HideOriginalBars(CurrentRoot, false)
+    end
+end
+
+local function BindTool(tool)
+    if tool:IsA("Tool") then
+        local eq = tool.Equipped:Connect(function() OnToolEquipped(tool) end)
+        local un = tool.Unequipped:Connect(function() OnToolUnequipped(tool) end)
+        table.insert(ToolConns, eq)
+        table.insert(ToolConns, un)
+    end
+end
+
+local function SetupCharacter(char)
+    DisconnectArrayConns(ToolConns)
+    DisconnectArrayConns(CharConns)
+    CurrentRoot = nil
+    DisconnectConn(RootChildAddedConn)
+    for _, t in ipairs(char:GetChildren()) do
+        if t:IsA("Tool") then
+            BindTool(t)
+        end
+    end
+    table.insert(CharConns, char.ChildAdded:Connect(function(ch)
+        if ch:IsA("Tool") then
+            BindTool(ch)
+        end
+    end))
+    table.insert(CharConns, char.ChildRemoved:Connect(function(ch)
+        if ch:IsA("Tool") then
+            OnToolUnequipped(ch)
+        end
+    end))
+    for _, t in ipairs(char:GetChildren()) do
+        if t:IsA("Tool") and t.Parent == char then
+            OnToolEquipped(t)
+            break
+        end
+    end
+end
+
+local function ClearPixelData()
+    for y = 1, CONFIG.GRID_SIZE do
+        for x = 1, CONFIG.GRID_SIZE do
+            if PixelData[y] and PixelData[y][x] then
+                PixelData[y][x].BackgroundTransparency = 1
+            end
+        end
+    end
+end
+
+local function CreateEditor()
+    if EditorGui then
+        EditorGui:Destroy()
+        EditorGui = nil
+        return
+    end
+
+    EditorGui = Instance.new("ScreenGui")
+    EditorGui.Name = "CrosshairEditor"
+    EditorGui.ResetOnSpawn = false
+    EditorGui.DisplayOrder = 998
+    EditorGui.Parent = PlayerGui
+
+    local MainFrame = Instance.new("Frame")
+    MainFrame.Size = UDim2.new(0, 360, 0, 420)
+    MainFrame.Position = UDim2.new(0.5, -180, 0.5, -210)
+    MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    MainFrame.BorderSizePixel = 0
+    MainFrame.Active = true
+    MainFrame.Parent = EditorGui
+    MakeDraggable(MainFrame)
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 8)
+    Corner.Parent = MainFrame
+
+    local Title = Instance.new("TextLabel")
+    Title.Size = UDim2.new(1, 0, 0, 28)
+    Title.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+    Title.Text = "CROSSHAIR EDITOR"
+    Title.TextColor3 = Color3.new(1, 1, 1)
+    Title.Font = Enum.Font.GothamBold
+    Title.TextSize = 14
+    Title.BorderSizePixel = 0
+    Title.Parent = MainFrame
+
+    local TitleCorner = Instance.new("UICorner")
+    TitleCorner.CornerRadius = UDim.new(0, 8)
+    TitleCorner.Parent = Title
+
+    local CloseBtn = Instance.new("TextButton")
+    CloseBtn.Size = UDim2.new(0, 24, 0, 24)
+    CloseBtn.Position = UDim2.new(1, -26, 0, 2)
+    CloseBtn.BackgroundTransparency = 1
+    CloseBtn.Text = "X"
+    CloseBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+    CloseBtn.Font = Enum.Font.GothamBold
+    CloseBtn.TextSize = 14
+    CloseBtn.BorderSizePixel = 0
+    CloseBtn.Parent = Title
+    CloseBtn.MouseButton1Click:Connect(function()
+        EditorGui:Destroy()
+        EditorGui = nil
+    end)
+
+    local GridContainer = Instance.new("Frame")
+    GridContainer.Size = UDim2.new(0, CONFIG.GRID_SIZE * CONFIG.PIXEL_SIZE, 0, CONFIG.GRID_SIZE * CONFIG.PIXEL_SIZE)
+    GridContainer.Position = UDim2.new(0, 12, 0, 40)
+    GridContainer.BackgroundColor3 = Color3.new(1, 1, 1)
+    GridContainer.BorderSizePixel = 1
+    GridContainer.BorderColor3 = Color3.fromRGB(100, 100, 100)
+    GridContainer.Parent = MainFrame
+
+    for i = 1, CONFIG.GRID_SIZE - 1 do
+        local vLine = Instance.new("Frame")
+        vLine.Size = UDim2.new(0, 1, 1, 0)
+        vLine.Position = UDim2.new(0, i * CONFIG.PIXEL_SIZE, 0, 0)
+        vLine.BackgroundColor3 = Color3.fromRGB(185, 205, 230)
+        vLine.BorderSizePixel = 0
+        vLine.ZIndex = 2
+        vLine.Parent = GridContainer
+
+        local hLine = Instance.new("Frame")
+        hLine.Size = UDim2.new(1, 0, 0, 1)
+        hLine.Position = UDim2.new(0, 0, 0, i * CONFIG.PIXEL_SIZE)
+        hLine.BackgroundColor3 = Color3.fromRGB(185, 205, 230)
+        hLine.BorderSizePixel = 0
+        hLine.ZIndex = 2
+        hLine.Parent = GridContainer
+    end
+
+    for y = 1, CONFIG.GRID_SIZE do
+        PixelData[y] = {}
+        for x = 1, CONFIG.GRID_SIZE do
+            local Pixel = Instance.new("TextButton")
+            Pixel.Name = "Pixel"
+            Pixel.Size = UDim2.new(0, CONFIG.PIXEL_SIZE, 0, CONFIG.PIXEL_SIZE)
+            Pixel.Position = UDim2.new(0, (x-1) * CONFIG.PIXEL_SIZE, 0, (y-1) * CONFIG.PIXEL_SIZE)
+            Pixel.BackgroundTransparency = 1
+            Pixel.BorderSizePixel = 0
+            Pixel.Text = ""
+            Pixel.AutoButtonColor = false
+            Pixel.ZIndex = 3
+            Pixel.Parent = GridContainer
+
+            PixelData[y][x] = Pixel
+
+            local function paint()
+                if IsEraser then
+                    Pixel.BackgroundTransparency = 1
+                else
+                    Pixel.BackgroundColor3 = CurrentColor
+                    Pixel.BackgroundTransparency = 0
+                end
+            end
+
+            Pixel.MouseButton1Down:Connect(function()
+                IsDrawing = true
+                paint()
+            end)
+            Pixel.MouseEnter:Connect(function()
+                if IsDrawing then paint() end
+            end)
+        end
+    end
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            IsDrawing = false
+        end
+    end)
+
+    local ToolsFrame = Instance.new("Frame")
+    ToolsFrame.Size = UDim2.new(0, 52, 0, 120)
+    ToolsFrame.Position = UDim2.new(1, -64, 0, 40)
+    ToolsFrame.BackgroundTransparency = 1
+    ToolsFrame.Parent = MainFrame
+
+    local PencilBtn = Instance.new("TextButton")
+    PencilBtn.Size = UDim2.new(0, 48, 0, 48)
+    PencilBtn.Position = UDim2.new(0, 2, 0, 0)
+    PencilBtn.BackgroundTransparency = 1
+    PencilBtn.Text = "✏️"
+    PencilBtn.TextColor3 = Color3.new(1, 1, 1)
+    PencilBtn.Font = Enum.Font.Gotham
+    PencilBtn.TextSize = 24
+    PencilBtn.Parent = ToolsFrame
+    PencilBtn.MouseButton1Click:Connect(function()
+        IsEraser = false
+    end)
+
+    local EraserBtn = Instance.new("TextButton")
+    EraserBtn.Size = UDim2.new(0, 48, 0, 48)
+    EraserBtn.Position = UDim2.new(0, 2, 0, 60)
+    EraserBtn.BackgroundTransparency = 1
+    EraserBtn.Text = "⬜"
+    EraserBtn.TextColor3 = Color3.new(1, 1, 1)
+    EraserBtn.Font = Enum.Font.Gotham
+    EraserBtn.TextSize = 24
+    EraserBtn.Parent = ToolsFrame
+    EraserBtn.MouseButton1Click:Connect(function()
+        IsEraser = true
+    end)
+
+    local ColorFrame = Instance.new("Frame")
+    ColorFrame.Size = UDim2.new(1, -24, 0, 32)
+    ColorFrame.Position = UDim2.new(0, 12, 0, 40 + CONFIG.GRID_SIZE * CONFIG.PIXEL_SIZE + 6)
+    ColorFrame.BackgroundTransparency = 1
+    ColorFrame.Parent = MainFrame
+
+    local ColorGrid = Instance.new("Frame")
+    ColorGrid.Size = UDim2.new(1, 0, 1, 0)
+    ColorGrid.BackgroundTransparency = 1
+    ColorGrid.Parent = ColorFrame
+
+    local CLayout = Instance.new("UIGridLayout")
+    CLayout.CellSize = UDim2.new(0, 28, 0, 28)
+    CLayout.CellPadding = UDim2.new(0, 4, 0, 4)
+    CLayout.FillDirection = Enum.FillDirection.Horizontal
+    CLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    CLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    CLayout.Parent = ColorGrid
+
+    for _, color in ipairs(PALETTE) do
+        local ColorBtn = Instance.new("TextButton")
+        ColorBtn.Size = UDim2.new(0, 28, 0, 28)
+        ColorBtn.BackgroundColor3 = color
+        ColorBtn.Text = ""
+        ColorBtn.BorderSizePixel = 2
+        ColorBtn.BorderColor3 = Color3.fromRGB(80, 80, 80)
+        ColorBtn.AutoButtonColor = false
+        ColorBtn.Parent = ColorGrid
+
+        local BtnCorner = Instance.new("UICorner")
+        BtnCorner.CornerRadius = UDim.new(0, 4)
+        BtnCorner.Parent = ColorBtn
+
+        ColorBtn.MouseButton1Click:Connect(function()
+            CurrentColor = color
+            IsEraser = false
+            for _, ch in ipairs(ColorGrid:GetChildren()) do
+                if ch:IsA("TextButton") then
+                    ch.BorderColor3 = Color3.fromRGB(80, 80, 80)
+                    ch.BorderSizePixel = 2
+                end
+            end
+            ColorBtn.BorderColor3 = Color3.fromRGB(255, 255, 255)
+            ColorBtn.BorderSizePixel = 3
+        end)
+    end
+
+    local BtnFrame = Instance.new("Frame")
+    BtnFrame.Size = UDim2.new(1, -24, 0, 32)
+    BtnFrame.Position = UDim2.new(0, 12, 1, -40)
+    BtnFrame.BackgroundTransparency = 1
+    BtnFrame.Parent = MainFrame
+
+    local ClearBtn = Instance.new("TextButton")
+    ClearBtn.Size = UDim2.new(0.5, -6, 0, 32)
+    ClearBtn.Position = UDim2.new(0, 0, 0, 0)
+    ClearBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    ClearBtn.Text = "CLEAR"
+    ClearBtn.TextColor3 = Color3.new(1, 1, 1)
+    ClearBtn.Font = Enum.Font.GothamBold
+    ClearBtn.TextSize = 13
+    ClearBtn.BorderSizePixel = 0
+    ClearBtn.Parent = BtnFrame
+    local ClearCorner = Instance.new("UICorner")
+    ClearCorner.CornerRadius = UDim.new(0, 6)
+    ClearCorner.Parent = ClearBtn
+    ClearBtn.MouseButton1Click:Connect(function()
+        ClearPixelData()
+    end)
+
+    local ApplyBtn = Instance.new("TextButton")
+    ApplyBtn.Size = UDim2.new(0.5, -6, 0, 32)
+    ApplyBtn.Position = UDim2.new(0.5, 6, 0, 0)
+    ApplyBtn.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+    ApplyBtn.Text = "APPLY"
+    ApplyBtn.TextColor3 = Color3.new(1, 1, 1)
+    ApplyBtn.Font = Enum.Font.GothamBold
+    ApplyBtn.TextSize = 13
+    ApplyBtn.BorderSizePixel = 0
+    ApplyBtn.Parent = BtnFrame
+    local ApplyCorner = Instance.new("UICorner")
+    ApplyCorner.CornerRadius = UDim.new(0, 6)
+    ApplyCorner.Parent = ApplyBtn
+    ApplyBtn.MouseButton1Click:Connect(function()
+        SaveDesignFromEditor()
+        local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+        SetupCharacter(char)
+        if HasWeapon() then
+            local root = FindCrosshairContainer()
+            if root then
+                ApplyToRoot(root)
+            end
+        end
+    end)
+end
+
+local function InitCharacter(char)
+    SetupCharacter(char)
+end
+
+if LocalPlayer.Character then
+    InitCharacter(LocalPlayer.Character)
+end
+LocalPlayer.CharacterAdded:Connect(InitCharacter)
+
+local function StartShowSafeZone()
+    ShowSafeZoneEnabled = true
+    
+    local part = nil
+
+    local durka = workspace:FindFirstChild("дурка")
+    if durka then
+        local sz = durka:FindFirstChild("SafeZones")
+        if sz then
+            part = sz:FindFirstChild("ZoneSpawn1")
+        end
+    end
+
+    if not part then
+        local sz = workspace:FindFirstChild("SafeZones")
+        if sz then
+            part = sz:FindFirstChild("ZoneSpawn1")
+        end
+    end
+
+    if part then
+        SafeZoneESP = Instance.new("SelectionBox")
+        SafeZoneESP.Adornee = part
+        SafeZoneESP.Color3 = Color3.fromRGB(0, 100, 255)
+        SafeZoneESP.LineThickness = 0.03
+        SafeZoneESP.Transparency = 0
+        SafeZoneESP.SurfaceTransparency = 1
+        SafeZoneESP.Parent = game.CoreGui
+    end
+end
+
+local function StopShowSafeZone()
+    ShowSafeZoneEnabled = false
+    
+    if SafeZoneESP then
+        SafeZoneESP:Destroy()
+        SafeZoneESP = nil
+    end
 end
 
 local oldIndex
@@ -1848,6 +2348,31 @@ local GunESPToggle = VisualTab:CreateToggle({
     end,
 })
 
+local ShowSafeZoneToggle = VisualTab:CreateToggle({
+    Name = "Show Safe Zone",
+    CurrentValue = false,
+    Flag = "ShowSafeZoneToggle",
+    Callback = function(Value)
+        if Value then
+            StartShowSafeZone()
+            Rayfield:Notify({
+                Title = "Show Safe Zone",
+                Content = "Enabled",
+                Duration = 1,
+                Image = "shield"
+            })
+        else
+            StopShowSafeZone()
+            Rayfield:Notify({
+                Title = "Show Safe Zone",
+                Content = "Disabled",
+                Duration = 1,
+                Image = "shield-off"
+            })
+        end
+    end,
+})
+
 local FullbrightToggle = VisualTab:CreateToggle({
     Name = "Fullbright",
     CurrentValue = false,
@@ -1870,6 +2395,54 @@ local FullbrightToggle = VisualTab:CreateToggle({
                 Image = "lightbulb-off"
             })
         end
+    end,
+})
+
+local CustomCrosshairToggle = VisualTab:CreateToggle({
+    Name = "Custom Crosshair",
+    CurrentValue = false,
+    Flag = "CustomCrosshairToggle",
+    Callback = function(Value)
+        CustomCrosshairEnabled = Value
+        if Value then
+            if SavedCrosshairData then
+                local char = LocalPlayer.Character
+                if char then
+                    SetupCharacter(char)
+                    if HasWeapon() then
+                        local root = FindCrosshairContainer()
+                        if root then
+                            ApplyToRoot(root)
+                        end
+                    end
+                end
+            end
+            Rayfield:Notify({
+                Title = "Custom Crosshair",
+                Content = "Enabled",
+                Duration = 1,
+                Image = "crosshair"
+            })
+        else
+            if CurrentRoot then
+                ClearCustomPixels(CurrentRoot)
+                HideOriginalBars(CurrentRoot, false)
+                CurrentRoot = nil
+            end
+            Rayfield:Notify({
+                Title = "Custom Crosshair",
+                Content = "Disabled",
+                Duration = 1,
+                Image = "x"
+            })
+        end
+    end,
+})
+
+local OpenCrosshairEditorButton = VisualTab:CreateButton({
+    Name = "Open Crosshair Editor",
+    Callback = function()
+        CreateEditor()
     end,
 })
 
@@ -2205,15 +2778,184 @@ Players.PlayerRemoving:Connect(function()
     end
 end)
 
+ToolsTab:CreateSection("Player")
+
+local AutoSprintToggle = ToolsTab:CreateToggle({
+    Name = "Auto Sprint",
+    CurrentValue = false,
+    Flag = "AutoSprintToggle",
+    Callback = function(Value)
+        AutoSprintEnabled = Value
+        Rayfield:Notify({
+            Title = "Auto Sprint",
+            Content = Value and "Enabled" or "Disabled",
+            Duration = 1,
+            Image = Value and "footprints" or "x"
+        })
+    end,
+})
+
+RunService.Heartbeat:Connect(function()
+    if not AutoSprintEnabled then return end
+    
+    local character = LocalPlayer.Character
+    if not character then return end
+    
+    local humanoid = character:FindFirstChild("Humanoid")
+    if not humanoid then return end
+    
+    if humanoid.WalkSpeed < 17 then
+        humanoid.WalkSpeed = 17
+    end
+end)
+
+local NoFallDamageToggle = ToolsTab:CreateToggle({
+    Name = "No Fall Damage",
+    CurrentValue = false,
+    Flag = "NoFallDamageToggle",
+    Callback = function(Value)
+        NoFallDamageEnabled = Value
+        Rayfield:Notify({
+            Title = "No Fall Damage",
+            Content = Value and "Enabled" or "Disabled",
+            Duration = 1,
+            Image = Value and "shield" or "shield-off"
+        })
+    end,
+})
+
+spawn(function()
+    game:GetService("RunService").Heartbeat:Connect(function()
+        if NoFallDamageEnabled then
+            local player = LocalPlayer
+            if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                local hrp = player.Character.HumanoidRootPart
+                local vel = hrp.Velocity
+                hrp.Velocity = Vector3.new(0, 90, 0)
+                game:GetService("RunService").RenderStepped:Wait()
+                hrp.Velocity = vel
+            end
+        end
+    end)
+end)
+
+ToolsTab:CreateSection("Ladder")
+
+local LadderSizeSlider = ToolsTab:CreateSlider({
+    Name = "Ladder Size",
+    Range = {10, 1000},
+    Increment = 10,
+    Suffix = " studs",
+    CurrentValue = 500,
+    Flag = "LadderSizeSlider",
+    Callback = function(Value)
+        LadderSize = Value
+    end,
+})
+
+local CreateLadderButton = ToolsTab:CreateButton({
+    Name = "Create Ladder",
+    Callback = function()
+        local character = LocalPlayer.Character
+        if not character or not character:FindFirstChild("HumanoidRootPart") then
+            Rayfield:Notify({
+                Title = "Ladder",
+                Content = "Character not found",
+                Duration = 1,
+                Image = "alert-circle"
+            })
+            return
+        end
+        
+        local hrp = character.HumanoidRootPart
+        local ladderHeight = LadderSize
+        local stepHeight = 1
+        local stepWidth = 4
+        local stepDepth = 0.5
+        local sideWidth = 0.3
+        
+        local ladderModel = Instance.new("Model")
+        ladderModel.Name = "Ladder"
+        
+        local rayParams = RaycastParams.new()
+        rayParams.FilterDescendantsInstances = {character}
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        
+        local rayResult = workspace:Raycast(hrp.Position, Vector3.new(0, -1000, 0), rayParams)
+        local groundY = rayResult and rayResult.Position.Y or (hrp.Position.Y - 3)
+        
+        local ladderPos = hrp.Position + hrp.CFrame.LookVector * 5
+        ladderPos = Vector3.new(ladderPos.X, groundY, ladderPos.Z)
+        
+        local leftPost = Instance.new("Part")
+        leftPost.Size = Vector3.new(sideWidth, ladderHeight, sideWidth)
+        leftPost.Position = ladderPos + Vector3.new(-stepWidth/2 + sideWidth/2, ladderHeight/2, 0)
+        leftPost.Anchored = true
+        leftPost.Material = Enum.Material.Metal
+        leftPost.Color = Color3.fromRGB(100, 100, 100)
+        leftPost.Parent = ladderModel
+        
+        local rightPost = Instance.new("Part")
+        rightPost.Size = Vector3.new(sideWidth, ladderHeight, sideWidth)
+        rightPost.Position = ladderPos + Vector3.new(stepWidth/2 - sideWidth/2, ladderHeight/2, 0)
+        rightPost.Anchored = true
+        rightPost.Material = Enum.Material.Metal
+        rightPost.Color = Color3.fromRGB(100, 100, 100)
+        rightPost.Parent = ladderModel
+        
+        local numSteps = math.floor(ladderHeight / stepHeight)
+        for i = 1, numSteps do
+            local step = Instance.new("Part")
+            step.Size = Vector3.new(stepWidth, stepDepth, sideWidth)
+            step.Position = ladderPos + Vector3.new(0, i * stepHeight - stepHeight/2, 0)
+            step.Anchored = true
+            step.Material = Enum.Material.Metal
+            step.Color = Color3.fromRGB(120, 120, 120)
+            step.CanCollide = true
+            step.Parent = ladderModel
+        end
+        
+        ladderModel.Parent = workspace
+        table.insert(CreatedLadders, ladderModel)
+        
+        Rayfield:Notify({
+            Title = "Ladder",
+            Content = "Ladder created",
+            Duration = 1,
+            Image = "check"
+        })
+    end,
+})
+
+local RemoveAllLaddersButton = ToolsTab:CreateButton({
+    Name = "Remove All Ladders",
+    Callback = function()
+        for _, ladder in pairs(CreatedLadders) do
+            if ladder and ladder.Parent then
+                ladder:Destroy()
+            end
+        end
+        CreatedLadders = {}
+        
+        Rayfield:Notify({
+            Title = "Ladder",
+            Content = "All ladders removed",
+            Duration = 1,
+            Image = "trash"
+        })
+    end,
+})
+
+ToolsTab:CreateSection("Misc")
+
+local InfiniteYieldButton = ToolsTab:CreateButton({
+    Name = "Infinite Yield",
+    Callback = function()
+        loadstring(game:HttpGet('https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source'))()
+    end,
+})
+
 LocalPlayer.CharacterAdded:Connect(function(character)
     isActionActive = false
     originalPosition = nil
-    
-    local userId = LocalPlayer.UserId
-    if playerSafeZoneStatus[userId] then
-        playerSafeZoneStatus[userId].justSpawned = true
-        playerSafeZoneStatus[userId].isProtected = false
-        playerSafeZoneStatus[userId].enterTime = nil
-        playerSafeZoneStatus[userId].exitTime = nil
-    end
 end)
