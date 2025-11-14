@@ -26,6 +26,7 @@ local ToolsTab = Window:CreateTab("Tools", "hammer")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -119,6 +120,18 @@ local CurrentRoot = nil
 local RootChildAddedConn = nil
 local ToolConns = {}
 local CharConns = {}
+
+local currentChar, currentHRP, currentHead
+
+RunService.Heartbeat:Connect(function()
+    currentChar = LocalPlayer.Character
+    if currentChar then
+        currentHRP = currentChar:FindFirstChild("HumanoidRootPart")
+        currentHead = currentChar:FindFirstChild("Head")
+    else
+        currentHRP, currentHead = nil, nil
+    end
+end)
 
 local function CreateSilentAimCore()
     local function IsPointInPart(point, part)
@@ -214,8 +227,7 @@ local function CreateSilentAimCore()
         local isChar, _ = IsPartOfCharacter(part)
         if isChar then return false end
         
-        local transparency = part.Transparency
-        if transparency >= 0.95 then return false end
+        if part.Transparency >= 0.95 then return false end
         
         local size = part.Size
         local minDimension = math.min(size.X, size.Y, size.Z)
@@ -281,50 +293,50 @@ local function CreateSilentAimCore()
     local function GetClosestEnemyHead(forAutoFire, targetListEnabled, targetedPlayers, usePrediction, predictionAmount, maxDistance)
         local closestScreenDistance = math.huge
         local closestHeadPos = nil
-        local myCharacter = LocalPlayer.Character
         
-        if not myCharacter or not myCharacter:FindFirstChild("HumanoidRootPart") then
+        if not currentChar or not currentHRP then
             return nil
         end
         
         if forAutoFire then
-            if IsInSafeZone(myCharacter) then
-                return nil
-            end
-            if myCharacter:FindFirstChildOfClass("ForceField") then
+            if currentChar:FindFirstChildOfClass("ForceField") then
                 return nil
             end
         end
         
-        local myHRP = myCharacter.HumanoidRootPart
         local mousePos = UserInputService:GetMouseLocation()
 
-        for _, player in pairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer and player.Character then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
                 local character = player.Character
-                local head = character:FindFirstChild("Head")
-                local humanoid = character:FindFirstChild("Humanoid")
-                local enemyHRP = character:FindFirstChild("HumanoidRootPart")
-                
-                if head and humanoid and humanoid.Health > 0 and enemyHRP then
-                    if IsPlayerTargeted(player, targetListEnabled, targetedPlayers) and not IsInSafeZone(character) and not character:FindFirstChildOfClass("ForceField") then
-                        local headPos3D = head.Position
-                        local distance3D = (headPos3D - myHRP.Position).Magnitude
-                        
-                        if distance3D <= maxDistance then
-                            local headPos2D = Camera:WorldToViewportPoint(headPos3D)
-                            local screenDistance = (Vector2.new(headPos2D.X, headPos2D.Y) - mousePos).Magnitude
+                if character then
+                    local head = character:FindFirstChild("Head")
+                    local humanoid = character:FindFirstChild("Humanoid")
+                    local enemyHRP = character:FindFirstChild("HumanoidRootPart")
+                    
+                    if head and humanoid and humanoid.Health > 0 and enemyHRP then
+                        if IsPlayerTargeted(player, targetListEnabled, targetedPlayers)
+                            and not IsInSafeZone(character)
+                            and not character:FindFirstChildOfClass("ForceField") then
                             
-                            if screenDistance < closestScreenDistance then
-                                local canHit, hitChar = AdvancedRaycast(myHRP.Position, headPos3D, {myCharacter})
+                            local headPos3D = head.Position
+                            local distance3D = (headPos3D - currentHRP.Position).Magnitude
+                            
+                            if distance3D <= maxDistance then
+                                local headPos2D = Camera:WorldToViewportPoint(headPos3D)
+                                local screenDistance = (Vector2.new(headPos2D.X, headPos2D.Y) - mousePos).Magnitude
                                 
-                                if canHit and hitChar == character then
-                                    closestScreenDistance = screenDistance
-                                    closestHeadPos = headPos3D
+                                if screenDistance < closestScreenDistance then
+                                    local canHit, hitChar = AdvancedRaycast(currentHRP.Position, headPos3D, {currentChar})
                                     
-                                    if usePrediction and predictionAmount > 0 then
-                                        local velocity = enemyHRP.AssemblyLinearVelocity
-                                        closestHeadPos = closestHeadPos + (velocity * predictionAmount)
+                                    if canHit and hitChar == character then
+                                        closestScreenDistance = screenDistance
+                                        closestHeadPos = headPos3D
+                                        
+                                        if usePrediction and predictionAmount > 0 then
+                                            local velocity = enemyHRP.AssemblyLinearVelocity
+                                            closestHeadPos = closestHeadPos + (velocity * predictionAmount)
+                                        end
                                     end
                                 end
                             end
@@ -348,6 +360,52 @@ local function CreateSilentAimCore()
 end
 
 local SilentAimCore = CreateSilentAimCore()
+
+local PlayerList = {}
+local function RebuildPlayerList()
+    table.clear(PlayerList)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            table.insert(PlayerList, plr)
+        end
+    end
+end
+RebuildPlayerList()
+Players.PlayerAdded:Connect(function(p)
+    if p ~= LocalPlayer then table.insert(PlayerList, p) end
+end)
+Players.PlayerRemoving:Connect(function(p)
+    for i,v in ipairs(PlayerList) do
+        if v == p then
+            table.remove(PlayerList, i)
+            break
+        end
+    end
+end)
+
+local function IsPlayerProtectedBySafeZone(player)
+    if not player or not player.Character then return false end
+    local team = player.Team
+    if not team or not ProtectedTeams[team.Name] then
+        return false
+    end
+    return SilentAimCore.IsInSafeZone(player.Character)
+end
+
+local function IsLocalPlayerProtected()
+    if not currentChar then return false end
+    local team = LocalPlayer.Team
+    if not team or not ProtectedTeams[team.Name] then
+        return false
+    end
+    if SilentAimCore.IsInSafeZone(currentChar) then
+        return true
+    end
+    if currentChar:FindFirstChildOfClass("ForceField") then
+        return true
+    end
+    return false
+end
 
 local function CreatePlayerFrame(player, scrollFrame, targetedPlayers)
     local PlayerFrame = Instance.new("Frame")
@@ -471,7 +529,7 @@ local function UpdatePlayerList(scrollFrame, targetedPlayers)
         end
     end
     
-    for playerName, frame in pairs(existingPlayers) do
+    for _, frame in pairs(existingPlayers) do
         frame:Destroy()
     end
     
@@ -723,24 +781,22 @@ local function GetClosestEnemyPart(targetPart, targetListEnabled, targetedPlayer
     local closestPartPos = nil
     local closestPlayer = nil
     local closestCharacter = nil
-    local myCharacter = LocalPlayer.Character
     
-    if not myCharacter or not myCharacter:FindFirstChild("HumanoidRootPart") then
+    if not currentChar or not currentHRP then
         return nil, nil
     end
     
-    if SilentAimCore.IsInSafeZone(myCharacter) then
+    if SilentAimCore.IsInSafeZone(currentChar) then
         return nil, nil
     end
     
-    if myCharacter:FindFirstChildOfClass("ForceField") then
+    if currentChar:FindFirstChildOfClass("ForceField") then
         return nil, nil
     end
     
-    local myHRP = myCharacter.HumanoidRootPart
     local mousePos = UserInputService:GetMouseLocation()
 
-    for _, player in pairs(Players:GetPlayers()) do
+    for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
             local character = player.Character
             local humanoid = character:FindFirstChild("Humanoid")
@@ -751,14 +807,14 @@ local function GetClosestEnemyPart(targetPart, targetListEnabled, targetedPlayer
                     
                     if part then
                         local partPos3D = part.Position + offset
-                        local distance3D = (partPos3D - myHRP.Position).Magnitude
+                        local distance3D = (partPos3D - currentHRP.Position).Magnitude
                         
                         if distance3D <= MaxDistance then
                             local partPos2D = Camera:WorldToViewportPoint(partPos3D)
                             local screenDistance = (Vector2.new(partPos2D.X, partPos2D.Y) - mousePos).Magnitude
                             
                             if screenDistance < closestScreenDistance then
-                                local canHit, hitChar = SilentAimCore.AdvancedRaycast(myHRP.Position, partPos3D, {myCharacter})
+                                local canHit, hitChar = SilentAimCore.AdvancedRaycast(currentHRP.Position, partPos3D, {currentChar})
                                 
                                 if canHit and hitChar == character then
                                     closestScreenDistance = screenDistance
@@ -1335,59 +1391,71 @@ oldIndex = hookmetamethod(game, "__index", function(self, key)
     return oldIndex(self, key)
 end)
 
-local AUTO_CLICKS_PER_STEP = 3
-local function fastClick(n)
-    n = n or AUTO_CLICKS_PER_STEP
-    for i = 1, n do
-        mouse1click()
-    end
+local function safeClick()
+    pcall(mouse1click)
 end
 
 RunService.RenderStepped:Connect(function()
-    if not (SilentAimEnabled and SilentAimAutoFireEnabled) then return end
-    
-    local myCharacter = LocalPlayer.Character
-    if not myCharacter then return end
-    if SilentAimCore.IsInSafeZone(myCharacter) then return end
-    if myCharacter:FindFirstChildOfClass("ForceField") then return end
-    
-    local tool = myCharacter:FindFirstChildOfClass("Tool")
-    if not tool or not tool:FindFirstChild("ConfigGun") then return end
-    
-    local targetHead = SilentAimCore.GetClosestEnemyHead(true, SilentAimTargetListEnabled, SilentAimTargetedPlayers, UsePrediction, PredictionAmount, MaxDistance)
-    if targetHead then
-        fastClick()
-    end
-end)
-
-RunService.RenderStepped:Connect(function()
-    if not (AimLockEnabled and AimLockAutoFireEnabled) then return end
-    
-    local myCharacter = LocalPlayer.Character
-    if not myCharacter then return end
-    if SilentAimCore.IsInSafeZone(myCharacter) then return end
-    if myCharacter:FindFirstChildOfClass("ForceField") then return end
-    
-    if AimLockTarget and AimLockTarget.Character then
-        local character = AimLockTarget.Character
-        local humanoid = character:FindFirstChild("Humanoid")
-        
-        if not humanoid or humanoid.Health <= 0 then
+    if SilentAimEnabled and SilentAimAutoFireEnabled and currentChar and currentHRP then
+        if IsLocalPlayerProtected() then
             return
         end
-        
-        if SilentAimCore.IsInSafeZone(character) then return end
-        if character:FindFirstChildOfClass("ForceField") then return end
-        
-        local part, offset = GetBodyPart(character, AimLockPart)
-        if part then
-            local myHead = myCharacter:FindFirstChild("Head")
-            if not myHead then return end
-            
-            local targetPos = part.Position + offset
-            local canHit, hitChar = SilentAimCore.AdvancedRaycast(myHead.Position, targetPos, {myCharacter})
-            if canHit and hitChar == character then
-                fastClick()
+
+        local tool = currentChar:FindFirstChildOfClass("Tool")
+        if tool and tool:FindFirstChild("ConfigGun") then
+            local targetHead = SilentAimCore.GetClosestEnemyHead(
+                true,
+                SilentAimTargetListEnabled,
+                SilentAimTargetedPlayers,
+                UsePrediction,
+                PredictionAmount,
+                MaxDistance
+            )
+
+            if targetHead then
+                local targetPlayer = nil
+                for _, plr in ipairs(PlayerList) do
+                    local ch = plr.Character
+                    if ch then
+                        local hd = ch:FindFirstChild("Head")
+                        if hd and (hd.Position - targetHead).Magnitude < 2 then
+                            targetPlayer = plr
+                            break
+                        end
+                    end
+                end
+
+                if not targetPlayer
+                    or (not IsPlayerProtectedBySafeZone(targetPlayer)
+                        and not (targetPlayer.Character and targetPlayer.Character:FindFirstChildOfClass("ForceField"))) then
+                    safeClick()
+                end
+            end
+        end
+    end
+
+    if AimLockEnabled and AimLockAutoFireEnabled and currentChar and currentHead then
+        if IsLocalPlayerProtected() then
+            return
+        end
+
+        local target = AimLockTarget
+        if target and target.Character then
+            local character = target.Character
+            local humanoid = character:FindFirstChild("Humanoid")
+            if humanoid and humanoid.Health > 0 then
+                if not IsPlayerProtectedBySafeZone(target)
+                    and not character:FindFirstChildOfClass("ForceField") then
+                    
+                    local part, offset = GetBodyPart(character, AimLockPart)
+                    if part then
+                        local targetPos = part.Position + offset
+                        local canHit, hitChar = SilentAimCore.AdvancedRaycast(currentHead.Position, targetPos, {currentChar})
+                        if canHit and hitChar == character then
+                            safeClick()
+                        end
+                    end
+                end
             end
         end
     end
@@ -1431,7 +1499,7 @@ RunService.RenderStepped:Connect(function()
 end)
 
 task.spawn(function()
-    while task.wait() do
+    while task.wait(0.05) do
         local character = LocalPlayer.Character
         if character then
             local tool = character:FindFirstChildOfClass("Tool")
@@ -1828,7 +1896,14 @@ local function LoadCharacter(v)
             updateConnections[v.Name]:Disconnect()
         end
         
-        local UpdateNameTag = function()
+        local lastUpdate = 0
+        local interval = 0.1
+
+        local function UpdateNameTag(dt)
+            lastUpdate = lastUpdate + dt
+            if lastUpdate < interval then return end
+            lastUpdate = 0
+
             if not PlayerESPEnabled then return end
             pcall(function()
                 if v.Character and v.Character:FindFirstChild("Humanoid") and v.Character:FindFirstChild("HumanoidRootPart") then
@@ -1845,8 +1920,7 @@ local function LoadCharacter(v)
             end)
         end
         
-        UpdateNameTag()
-        updateConnections[v.Name] = RunService.RenderStepped:Connect(UpdateNameTag)
+        updateConnections[v.Name] = RunService.Heartbeat:Connect(UpdateNameTag)
     end)
 end
 
@@ -1958,7 +2032,7 @@ local function StartPlayerESP()
             end
         end
         
-        while espLoopRunning and task.wait() do
+        while espLoopRunning and task.wait(0.1) do
             if not PlayerESPEnabled then break end
             for _, v in pairs(Players:GetPlayers()) do
                 if v ~= LocalPlayer and PlayerESPEnabled then
@@ -1973,7 +2047,7 @@ local function StopPlayerESP()
     PlayerESPEnabled = false
     espLoopRunning = false
     
-    for name, connection in pairs(updateConnections) do
+    for _, connection in pairs(updateConnections) do
         if connection then
             connection:Disconnect()
         end
@@ -2111,7 +2185,7 @@ local function CreateGunESP(tool)
     
     trackedGuns[tool] = {
         gui = billboardGui,
-        connection = RunService.Heartbeat:Connect(function()
+        connection = RunService.Heartbeat:Connect(function(dt)
             if not GunESPEnabled or not tool or not tool.Parent then
                 if trackedGuns[tool] then
                     trackedGuns[tool].connection:Disconnect()
@@ -2130,9 +2204,9 @@ local function CreateGunESP(tool)
                 return
             end
             
-            local currentTime = tick()
-            if currentTime - lastUpdate >= UPDATE_INTERVAL then
-                lastUpdate = currentTime
+            lastUpdate = lastUpdate + dt
+            if lastUpdate >= UPDATE_INTERVAL then
+                lastUpdate = 0
                 pcall(function()
                     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
                         local toolHandle = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart")
@@ -2255,24 +2329,21 @@ local OriginalLighting = {}
 local lightingConnection = nil
 
 local function SaveOriginalLighting()
-    local Light = game:GetService("Lighting")
-    OriginalLighting.Ambient = Light.Ambient
-    OriginalLighting.ColorShift_Bottom = Light.ColorShift_Bottom
-    OriginalLighting.ColorShift_Top = Light.ColorShift_Top
+    OriginalLighting.Ambient = Lighting.Ambient
+    OriginalLighting.ColorShift_Bottom = Lighting.ColorShift_Bottom
+    OriginalLighting.ColorShift_Top = Lighting.ColorShift_Top
 end
 
 local function ApplyFullbright()
-    local Light = game:GetService("Lighting")
-    Light.Ambient = Color3.fromRGB(255, 255, 255)
-    Light.ColorShift_Bottom = Color3.fromRGB(255, 255, 255)
-    Light.ColorShift_Top = Color3.fromRGB(255, 255, 255)
+    Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+    Lighting.ColorShift_Bottom = Color3.fromRGB(255, 255, 255)
+    Lighting.ColorShift_Top = Color3.fromRGB(255, 255, 255)
 end
 
 local function RestoreOriginalLighting()
-    local Light = game:GetService("Lighting")
-    Light.Ambient = OriginalLighting.Ambient or Color3.fromRGB(0, 0, 0)
-    Light.ColorShift_Bottom = OriginalLighting.ColorShift_Bottom or Color3.fromRGB(0, 0, 0)
-    Light.ColorShift_Top = OriginalLighting.ColorShift_Top or Color3.fromRGB(0, 0, 0)
+    Lighting.Ambient = OriginalLighting.Ambient or Color3.fromRGB(0, 0, 0)
+    Lighting.ColorShift_Bottom = OriginalLighting.ColorShift_Bottom or Color3.fromRGB(0, 0, 0)
+    Lighting.ColorShift_Top = OriginalLighting.ColorShift_Top or Color3.fromRGB(0, 0, 0)
 end
 
 local function StartFullbright()
@@ -2280,7 +2351,7 @@ local function StartFullbright()
     SaveOriginalLighting()
     ApplyFullbright()
     
-    lightingConnection = game:GetService("Lighting").LightingChanged:Connect(function()
+    lightingConnection = Lighting.LightingChanged:Connect(function()
         if FullbrightEnabled then
             ApplyFullbright()
         end
@@ -2580,62 +2651,74 @@ local function BestTeleportCFrameAround(targetHRP, myChar)
     local offset = 3
     local baseCF = targetHRP.CFrame
     local exclude = { myChar, targetHRP.Parent, Camera }
-    
-    local behindPos = baseCF * CFrame.new(0, 0, offset)
-    local behindPosWorld = behindPos.Position
-    
-    if PositionIsFree(CFrame.new(behindPosWorld), exclude) then
-        local down = GroundBelow(behindPosWorld, exclude)
+
+    local behindCF = baseCF * CFrame.new(0, 0, offset)
+    local behindPos = behindCF.Position
+
+    if PositionIsFree(CFrame.new(behindPos), exclude) then
+        local down = GroundBelow(behindPos, exclude)
         if down and down.Instance and down.Instance.CanCollide then
-            if HasLineOfSight(behindPosWorld + Vector3.new(0, 1.5, 0), targetHRP.Position, exclude) then
-                return CFrame.new(down.Position + Vector3.new(0, 3, 0))
+            local finalPos = down.Position + Vector3.new(0, 3, 0)
+            if HasLineOfSight(finalPos + Vector3.new(0, 1.5, 0), targetHRP.Position, exclude) then
+                return CFrame.new(finalPos)
             end
         end
     end
-    
-    local alternativePositions = {
+
+    local candidates = {
         baseCF * CFrame.new(0, 0, -offset),
         baseCF * CFrame.new(-offset, 0, 0),
         baseCF * CFrame.new(offset, 0, 0),
     }
-    
-    for _, cf in ipairs(alternativePositions) do
+
+    local bestCF = nil
+    local bestScore = math.huge
+
+    for _, cf in ipairs(candidates) do
         local pos = cf.Position
+
         if PositionIsFree(CFrame.new(pos), exclude) then
             local down = GroundBelow(pos, exclude)
             if down and down.Instance and down.Instance.CanCollide then
-                if HasLineOfSight(pos + Vector3.new(0, 1.5, 0), targetHRP.Position, exclude) then
-                    return CFrame.new(down.Position + Vector3.new(0, 3, 0))
+                local finalPos = down.Position + Vector3.new(0, 3, 0)
+                if HasLineOfSight(finalPos + Vector3.new(0, 1.5, 0), targetHRP.Position, exclude) then
+                    local dist = (finalPos - targetHRP.Position).Magnitude
+                    if dist < bestScore then
+                        bestScore = dist
+                        bestCF = CFrame.new(finalPos)
+                    end
                 end
             end
         end
     end
 
-    return nil
+    if bestCF then
+        return bestCF
+    end
+
+    local roughDown = GroundBelow(behindPos, exclude)
+    if roughDown and roughDown.Instance and roughDown.Instance.CanCollide then
+        return CFrame.new(roughDown.Position + Vector3.new(0, 3, 0))
+    end
+
+    return targetHRP.CFrame + Vector3.new(0, 3, 0)
 end
 
 function TeleportBehindOrBestSpot()
     if not TeleportToPlayerEnabled then return end
 
-    local myChar = LocalPlayer.Character
-    if not myChar or not myChar:FindFirstChild("HumanoidRootPart") then
+    local myCharLocal = LocalPlayer.Character
+    if not myCharLocal or not myCharLocal:FindFirstChild("HumanoidRootPart") then
         return
     end
 
-    local targetPlayer = nil
-    local targetHRP = nil
+    local targetPlayer
+    local targetHRP
 
     if TPToAimlockedEnabled and AimLockTarget and AimLockTarget.Character then
         targetPlayer = AimLockTarget
         targetHRP = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-        
         if not targetHRP then
-            Rayfield:Notify({
-                Title = "TP to Aimlocked",
-                Content = "Invalid aimlocked target",
-                Duration = 1,
-                Image = "alert-circle"
-            })
             return
         end
     else
@@ -2643,50 +2726,33 @@ function TeleportBehindOrBestSpot()
         
         targetPlayer = Players:FindFirstChild(SelectedPlayerForTeleport)
         if not targetPlayer or not targetPlayer.Character then
-            Rayfield:Notify({
-                Title = "Teleport",
-                Content = "Player not found or no character",
-                Duration = 1,
-                Image = "alert-circle"
-            })
             return
         end
         
         targetHRP = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
         if not targetHRP then 
-            Rayfield:Notify({
-                Title = "Teleport",
-                Content = "Target has no HumanoidRootPart",
-                Duration = 1,
-                Image = "alert-circle"
-            })
-            return 
+            return
         end
     end
     
     if UseMaxTeleportDistance then
-        local distance = (targetHRP.Position - myChar.HumanoidRootPart.Position).Magnitude
+        local distance = (targetHRP.Position - myCharLocal.HumanoidRootPart.Position).Magnitude
         if distance > MAX_TELEPORT_DISTANCE then
             Rayfield:Notify({
                 Title = "Teleport",
                 Content = "Target too far (" .. math.floor(distance) .. " studs). Max: 90 studs",
-                Duration = 1,
+                Duration = 1.5,
                 Image = "alert-triangle"
             })
             return
         end
     end
     
-    local best = BestTeleportCFrameAround(targetHRP, myChar)
+    local best = BestTeleportCFrameAround(targetHRP, myCharLocal)
     if best then
-        myChar.HumanoidRootPart.CFrame = best
+        myCharLocal.HumanoidRootPart.CFrame = best
     else
-        Rayfield:Notify({
-            Title = "Teleport",
-            Content = "No valid position found near " .. targetPlayer.Name,
-            Duration = 1,
-            Image = "alert-triangle"
-        })
+        myCharLocal.HumanoidRootPart.CFrame = targetHRP.CFrame + Vector3.new(0, 3, 0)
     end
 end
 
@@ -2766,6 +2832,7 @@ PlayerDropdown = TeleportTab:CreateDropdown({
 
 Players.PlayerAdded:Connect(function()
     task.wait(0.1)
+    RebuildPlayerList()
     if PlayerDropdown then
         PlayerDropdown:Refresh(GetAllPlayers())
     end
@@ -2773,6 +2840,7 @@ end)
 
 Players.PlayerRemoving:Connect(function()
     task.wait(0.1)
+    RebuildPlayerList()
     if PlayerDropdown then
         PlayerDropdown:Refresh(GetAllPlayers())
     end
@@ -2796,16 +2864,11 @@ local AutoSprintToggle = ToolsTab:CreateToggle({
 })
 
 RunService.Heartbeat:Connect(function()
-    if not AutoSprintEnabled then return end
-    
-    local character = LocalPlayer.Character
-    if not character then return end
-    
-    local humanoid = character:FindFirstChild("Humanoid")
-    if not humanoid then return end
-    
-    if humanoid.WalkSpeed < 17 then
-        humanoid.WalkSpeed = 17
+    if AutoSprintEnabled and currentChar then
+        local humanoid = currentChar:FindFirstChild("Humanoid")
+        if humanoid and humanoid.WalkSpeed < 17 then
+            humanoid.WalkSpeed = 17
+        end
     end
 end)
 
