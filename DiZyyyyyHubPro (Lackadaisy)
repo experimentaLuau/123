@@ -2606,7 +2606,7 @@ local TeleportToggle = TeleportTab:CreateToggle({
             Title = "Teleport 800 studs up",
             Content = Value and "Enabled" or "Disabled",
             Duration = 1,
-            Image = Value and "check" or "x"
+            Image = Value and "plane-takeoff" or "plane-landing"
         })
     end,
 })
@@ -2741,7 +2741,7 @@ function TeleportBehindOrBestSpot()
             Rayfield:Notify({
                 Title = "Teleport",
                 Content = "Target too far (" .. math.floor(distance) .. " studs). Max: 90 studs",
-                Duration = 1.5,
+                Duration = 1,
                 Image = "alert-triangle"
             })
             return
