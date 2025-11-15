@@ -134,10 +134,15 @@ RunService.Heartbeat:Connect(function()
 end)
 
 local function CreateSilentAimCore()
+    local SAFE_CENTER = Vector3.new(-108.075, 5.321, 253.103)
+    local SAFE_SIZE = Vector3.new(17.5, 10.643, 14.145) / 2
+
     local function IsPointInPart(point, part)
-        if not part:IsA("BasePart") then return false end
+        if not part or not part:IsA("BasePart") then
+            return false
+        end
         local rel = part.CFrame:PointToObjectSpace(point)
-        local size = part.Size / 2
+        local size = part.Size * 0.5
         return math.abs(rel.X) <= size.X and math.abs(rel.Y) <= size.Y and math.abs(rel.Z) <= size.Z
     end
 
@@ -145,7 +150,6 @@ local function CreateSilentAimCore()
         if cachedSafeZones then
             return cachedSafeZones
         end
-        
         local zones = {}
         local function addZones(folder)
             if not folder then return end
@@ -158,14 +162,33 @@ local function CreateSilentAimCore()
         addZones(workspace:FindFirstChild("SafeZones"))
         local durka = workspace:FindFirstChild("дурка")
         if durka then addZones(durka:FindFirstChild("SafeZones")) end
-        
         cachedSafeZones = zones
         return zones
     end
 
-    local function IsInSafeZone(character)
+    local function FindLegacyZoneSpawn()
+        local durka = workspace:FindFirstChild("дурка")
+        local part
+        if durka then
+            local sz = durka:FindFirstChild("SafeZones")
+            if sz then
+                part = sz:FindFirstChild("ZoneSpawn1")
+            end
+        end
+        if not part then
+            local sz = workspace:FindFirstChild("SafeZones")
+            if sz then
+                part = sz:FindFirstChild("ZoneSpawn1")
+            end
+        end
+        return part
+    end
+
+    local LegacyZoneSpawn = FindLegacyZoneSpawn()
+    local IS_LEGACY = LegacyZoneSpawn ~= nil
+
+    local function IsInSafeZone_Legacy(character)
         if not character then return false end
-        
         local partsToCheck = {
             "HumanoidRootPart",
             "Head",
@@ -175,22 +198,41 @@ local function CreateSilentAimCore()
             "Left Leg",
             "Right Leg"
         }
-        
-        local allZones = CollectSafeZones()
-        
+        local zones = CollectSafeZones()
+        if #zones == 0 and LegacyZoneSpawn then
+            zones = {LegacyZoneSpawn}
+        end
         for _, partName in ipairs(partsToCheck) do
             local part = character:FindFirstChild(partName)
             if part and part:IsA("BasePart") then
                 local pos = part.Position
-                for _, zone in ipairs(allZones) do
+                for _, zone in ipairs(zones) do
                     if IsPointInPart(pos, zone) then
                         return true
                     end
                 end
             end
         end
-        
         return false
+    end
+
+    local function IsInSafeZone_New(character)
+        if not character then return false end
+        local plr = Players:GetPlayerFromCharacter(character)
+        if not plr then return false end
+        local attr = plr:GetAttribute("SafeZone")
+        if attr ~= nil and attr ~= false then
+            return true
+        end
+        return false
+    end
+
+    local function IsInSafeZone(character)
+        if IS_LEGACY then
+            return IsInSafeZone_Legacy(character)
+        else
+            return IsInSafeZone_New(character)
+        end
     end
 
     local function IsPlayerTargeted(player, targetListEnabled, targetedPlayers)
@@ -204,88 +246,69 @@ local function CreateSilentAimCore()
         if not part then return false end
         local parent = part.Parent
         if not parent then return false end
-        
         if parent:FindFirstChild("Humanoid") then
             return true, parent
         end
-        
         if part.Parent:IsA("Accessory") or part.Parent:IsA("Hat") then
             local character = part.Parent.Parent
             if character and character:FindFirstChild("Humanoid") then
                 return true, character
             end
         end
-        
         return false, nil
     end
 
     local function IsWall(part)
         if not part or not part:IsA("BasePart") then return false end
-        
         if not part.CanCollide then return false end
-        
         local isChar, _ = IsPartOfCharacter(part)
         if isChar then return false end
-        
         if part.Transparency >= 0.95 then return false end
-        
         local size = part.Size
         local minDimension = math.min(size.X, size.Y, size.Z)
         if minDimension < 0.1 then return false end
-        
         return true
     end
 
     local function AdvancedRaycast(from, to, ignoreList)
         ignoreList = ignoreList or {}
         table.insert(ignoreList, Camera)
-        
         local params = RaycastParams.new()
         params.FilterDescendantsInstances = ignoreList
         params.FilterType = Enum.RaycastFilterType.Exclude
         params.IgnoreWater = true
-        
         local direction = (to - from)
         local distance = direction.Magnitude
         local rayResult = workspace:Raycast(from, direction, params)
-        
         if not rayResult then
             return true, nil
         end
-        
         local hitPart = rayResult.Instance
         local hitPosition = rayResult.Position
         local hitDistance = (hitPosition - from).Magnitude
-        
         local isChar, character = IsPartOfCharacter(hitPart)
-        
         if isChar then
             if character and character:FindFirstChild("Humanoid") then
                 return true, character
             end
         end
-        
         if hitPart.Parent:IsA("Accessory") or hitPart.Parent:IsA("Hat") then
             table.insert(ignoreList, hitPart.Parent)
             return AdvancedRaycast(from, to, ignoreList)
         end
-        
         if hitPart.Transparency >= 0.95 and not hitPart.CanCollide then
             table.insert(ignoreList, hitPart)
             return AdvancedRaycast(from, to, ignoreList)
         end
-        
         if IsWall(hitPart) then
             local remainingDistance = distance - hitDistance
             if remainingDistance > 0.5 then
                 return false, nil
             end
         end
-        
         if hitPart.CanCollide then
             return false, nil
         end
-        
         table.insert(ignoreList, hitPart)
         return AdvancedRaycast(from, to, ignoreList)
     end
@@ -293,19 +316,15 @@ local function CreateSilentAimCore()
     local function GetClosestEnemyHead(forAutoFire, targetListEnabled, targetedPlayers, usePrediction, predictionAmount, maxDistance)
         local closestScreenDistance = math.huge
         local closestHeadPos = nil
-        
         if not currentChar or not currentHRP then
             return nil
         end
-        
         if forAutoFire then
             if currentChar:FindFirstChildOfClass("ForceField") then
                 return nil
             end
         end
-        
         local mousePos = UserInputService:GetMouseLocation()
-
         for _, player in ipairs(Players:GetPlayers()) do
             if player ~= LocalPlayer then
                 local character = player.Character
@@ -313,26 +332,20 @@ local function CreateSilentAimCore()
                     local head = character:FindFirstChild("Head")
                     local humanoid = character:FindFirstChild("Humanoid")
                     local enemyHRP = character:FindFirstChild("HumanoidRootPart")
-                    
                     if head and humanoid and humanoid.Health > 0 and enemyHRP then
                         if IsPlayerTargeted(player, targetListEnabled, targetedPlayers)
                             and not IsInSafeZone(character)
                             and not character:FindFirstChildOfClass("ForceField") then
-                            
                             local headPos3D = head.Position
                             local distance3D = (headPos3D - currentHRP.Position).Magnitude
-                            
                             if distance3D <= maxDistance then
                                 local headPos2D = Camera:WorldToViewportPoint(headPos3D)
                                 local screenDistance = (Vector2.new(headPos2D.X, headPos2D.Y) - mousePos).Magnitude
-                                
                                 if screenDistance < closestScreenDistance then
                                     local canHit, hitChar = AdvancedRaycast(currentHRP.Position, headPos3D, {currentChar})
-                                    
                                     if canHit and hitChar == character then
                                         closestScreenDistance = screenDistance
                                         closestHeadPos = headPos3D
-                                        
                                         if usePrediction and predictionAmount > 0 then
                                             local velocity = enemyHRP.AssemblyLinearVelocity
                                             closestHeadPos = closestHeadPos + (velocity * predictionAmount)
@@ -345,8 +358,39 @@ local function CreateSilentAimCore()
                 end
             end
         end
-
         return closestHeadPos
+    end
+
+    local function DrawSafeZoneVisual()
+        if IS_LEGACY then
+            local part = LegacyZoneSpawn
+            if part then
+                SafeZoneESP = Instance.new("SelectionBox")
+                SafeZoneESP.Adornee = part
+                SafeZoneESP.Color3 = Color3.fromRGB(0, 100, 255)
+                SafeZoneESP.LineThickness = 0.03
+                SafeZoneESP.Transparency = 0
+                SafeZoneESP.SurfaceTransparency = 1
+                SafeZoneESP.Parent = game.CoreGui
+            end
+        else
+            local part = Instance.new("Part")
+            part.Name = "SafeZoneVisualPart"
+            part.Anchored = true
+            part.CanCollide = false
+            part.CanQuery = false
+            part.CFrame = CFrame.new(SAFE_CENTER)
+            part.Size = SAFE_SIZE * 2
+            part.Transparency = 1
+            part.Parent = workspace
+            SafeZoneESP = Instance.new("SelectionBox")
+            SafeZoneESP.Adornee = part
+            SafeZoneESP.Color3 = Color3.fromRGB(0, 255, 0)
+            SafeZoneESP.LineThickness = 0.03
+            SafeZoneESP.Transparency = 0
+            SafeZoneESP.SurfaceTransparency = 1
+            SafeZoneESP.Parent = game.CoreGui
+        end
     end
 
     return {
@@ -355,7 +399,8 @@ local function CreateSilentAimCore()
         AdvancedRaycast = AdvancedRaycast,
         IsPlayerTargeted = IsPlayerTargeted,
         CollectSafeZones = CollectSafeZones,
-        IsPointInPart = IsPointInPart
+        IsPointInPart = IsPointInPart,
+        DrawSafeZoneVisual = DrawSafeZoneVisual
     }
 end
 
@@ -503,14 +548,12 @@ end
 
 local function UpdatePlayerList(scrollFrame, targetedPlayers)
     if not scrollFrame then return end
-    
     local existingPlayers = {}
     for _, frame in pairs(scrollFrame:GetChildren()) do
         if frame:IsA("Frame") and frame.Name ~= "UIListLayout" then
             existingPlayers[frame.Name] = frame
         end
     end
-    
     for _, player in pairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
             if not existingPlayers[player.Name] then
@@ -518,7 +561,6 @@ local function UpdatePlayerList(scrollFrame, targetedPlayers)
             else
                 local frame = existingPlayers[player.Name]
                 frame.BackgroundColor3 = targetedPlayers[player.Name] and Color3.fromRGB(60, 140, 60) or Color3.fromRGB(35, 35, 35)
-                
                 local teamColor = player.Team and player.Team.TeamColor.Color or Color3.fromRGB(240, 240, 240)
                 local displayName = frame:FindFirstChild("DisplayName")
                 if displayName then
@@ -528,11 +570,9 @@ local function UpdatePlayerList(scrollFrame, targetedPlayers)
             existingPlayers[player.Name] = nil
         end
     end
-    
     for _, frame in pairs(existingPlayers) do
         frame:Destroy()
     end
-    
     local layout = scrollFrame:FindFirstChildOfClass("UIListLayout")
     if layout then
         scrollFrame.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
@@ -1342,38 +1382,15 @@ LocalPlayer.CharacterAdded:Connect(InitCharacter)
 
 local function StartShowSafeZone()
     ShowSafeZoneEnabled = true
-    
-    local part = nil
-
-    local durka = workspace:FindFirstChild("дурка")
-    if durka then
-        local sz = durka:FindFirstChild("SafeZones")
-        if sz then
-            part = sz:FindFirstChild("ZoneSpawn1")
-        end
+    if SafeZoneESP then
+        SafeZoneESP:Destroy()
+        SafeZoneESP = nil
     end
-
-    if not part then
-        local sz = workspace:FindFirstChild("SafeZones")
-        if sz then
-            part = sz:FindFirstChild("ZoneSpawn1")
-        end
-    end
-
-    if part then
-        SafeZoneESP = Instance.new("SelectionBox")
-        SafeZoneESP.Adornee = part
-        SafeZoneESP.Color3 = Color3.fromRGB(0, 100, 255)
-        SafeZoneESP.LineThickness = 0.03
-        SafeZoneESP.Transparency = 0
-        SafeZoneESP.SurfaceTransparency = 1
-        SafeZoneESP.Parent = game.CoreGui
-    end
+    SilentAimCore.DrawSafeZoneVisual()
 end
 
 local function StopShowSafeZone()
     ShowSafeZoneEnabled = false
-    
     if SafeZoneESP then
         SafeZoneESP:Destroy()
         SafeZoneESP = nil
@@ -2270,7 +2287,7 @@ local function StartGunESP()
     
     gunConnections.PlayerCharacterAdded = {}
     for _, player in pairs(Players:GetPlayers()) do
-        gunConnections.PlayerCharacterAdded[player.Name] = player.CharacterAdded:Connect(function(character)
+        gunConnections.PlayerCharacterAdded[player.Name] = player.CharacterAdded:Connect(function()
             task.wait(0.5)
             for tool, _ in pairs(trackedGuns) do
                 if IsInPlayerCharacter(tool) then
@@ -2281,7 +2298,7 @@ local function StartGunESP()
     end
     
     gunConnections.PlayerAdded = Players.PlayerAdded:Connect(function(player)
-        gunConnections.PlayerCharacterAdded[player.Name] = player.CharacterAdded:Connect(function(character)
+        gunConnections.PlayerCharacterAdded[player.Name] = player.CharacterAdded:Connect(function()
             task.wait(0.5)
             for tool, _ in pairs(trackedGuns) do
                 if IsInPlayerCharacter(tool) then
@@ -3022,4 +3039,3 @@ LocalPlayer.CharacterAdded:Connect(function(character)
     isActionActive = false
     originalPosition = nil
 end)
-
