@@ -2,11 +2,11 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/Pixeluted/adoniscries
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 local Window = Rayfield:CreateWindow({
-    Name = "Lackadaisy",
-    Icon = "cat",
-    LoadingTitle = "Lackadaisy",
+    Name = "Uranium",
+    Icon = "tornado",
+    LoadingTitle = "Uranium",
     LoadingSubtitle = "by 14z88",
-    ShowText = "Lackadaisy",
+    ShowText = "Uranium",
     Theme = "Default",
     ToggleUIKeybind = "K"
 })
@@ -3022,3 +3022,4 @@ LocalPlayer.CharacterAdded:Connect(function(character)
     isActionActive = false
     originalPosition = nil
 end)
+
